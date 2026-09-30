@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Mallar – Certifikatgenerator{% endblock %}
+{% block content %}
+<h1 class="h4 mb-3">Mallar</h1>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('upload_template') }}" enctype="multipart/form-data"
+              class="row g-2 align-items-end" aria-label="Ladda upp ny mall">
+            <div class="col-md-4">
+                <label for="name" class="form-label">Namn på mallen (valfritt)</label>
+                <input type="text" id="name" name="name" class="form-control" placeholder="t.ex. HPC012 höst">
+            </div>
+            <div class="col-md-5">
+                <label for="docx_file" class="form-label">Word-fil (.docx)</label>
+                <input type="file" id="docx_file" name="docx_file" class="form-control" accept=".docx" required>
+            </div>
+            <div class="col-md-3 d-grid">
+                <button type="submit" class="btn btn-primary">Ladda upp och spara</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if templates %}
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table mb-0">
+            <thead>
+            <tr>
+                <th scope="col">Namn</th>
+                <th scope="col">Platshållare</th>
+                <th scope="col">Uppladdad</th>
+                <th scope="col" class="text-end">Åtgärder</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for t in templates %}
+            <tr>
+                <td>
+                    <div class="fw-semibold">{{ t.name }}</div>
+                    <div class="small text-muted">{{ t.original_filename }}</div>
+                </td>
+                <td>
+                    {% for p in (t.placeholders.split(',') if t.placeholders else []) %}
+                    <span class="badge text-bg-secondary">{{ p }}</span>
+                    {% else %}
+                    <span class="badge text-bg-warning">Inga</span>
+                    {% endfor %}
+                </td>
+                <td class="small">{{ t.created_at }}</td>
+                <td class="text-end actions">
+                    <button type="button" class="btn btn-sm btn-outline-primary"
+                            data-preview-url="{{ url_for('template_preview', template_id=t.id) }}"
+                            data-preview-title="Mall: {{ t.name }}" data-preview-group="templates">Förhandsvisa</button>
+                    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('index', template=t.id) }}">Använd</a>
+                    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('template_download', template_id=t.id) }}">Ladda ner</a>
+                    <form method="POST" action="{{ url_for('template_delete', template_id=t.id) }}" class="d-inline"
+                          data-confirm="Ta bort mallen ”{{ t.name }}”? Redan skapade intyg påverkas inte.">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">Ta bort</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="alert alert-secondary">Det finns inga sparade mallar ännu.</div>
+{% endif %}
+{% endblock %}

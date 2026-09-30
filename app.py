@@ -1,240 +1,379 @@
-import os
+import hmac
 import io
+import logging
+import os
+import re
+import secrets
+import shutil
+import threading
 import zipfile
 from datetime import date
-from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, send_file
+
+from docx.opc.exceptions import PackageNotFoundError
+from flask import (Flask, abort, flash, redirect, render_template, request, send_file,
+                   session, url_for)
 from werkzeug.utils import secure_filename
-from convert_to_pdf import convert_docx_to_pdf
-from docx import Document
-from lxml import etree
-import subprocess
+
+from docx_fill import fill_template, find_placeholders
+from pdf_convert import ConversionError, convert_to_pdf, find_soffice
+from storage import Storage
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLE_TEMPLATE = os.path.join(BASE_DIR, "cert_template", "exempelmall.docx")
+
+log = logging.getLogger(__name__)
 
 
+def _load_secret_key(data_dir):
+    """SECRET_KEY från miljön, annars en nyckel som sparas i datakatalogen.
 
-# Flask Application Instance
-app = Flask(__name__)
-app.secret_key = "some_secret_key"  # Required for flash messages
-
-# Configuration
-UPLOAD_FOLDER = "uploads"
-TEMPLATE_FOLDER = "cert_template"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(TEMPLATE_FOLDER, exist_ok=True)
-ALLOWED_EXTENSIONS = {'docx'}
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['TEMPLATE_FOLDER'] = TEMPLATE_FOLDER
-
-# Ensure UPLOAD_FOLDER exists
-upload_folder = app.config['UPLOAD_FOLDER']
-if not os.path.exists(upload_folder):
-    os.makedirs(upload_folder)
-
-def clear_upload_folder(folder):
+    Nyckeln måste vara densamma i alla Gunicorn-processer, annars tappas
+    sessioner och meddelanden mellan förfrågningar.
     """
-    Removes all files in the specified folder.
-    """
-    for filename in os.listdir(folder):
-        file_path = os.path.join(folder, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-        except Exception as e:
-            print(f"Error removing file {file_path}: {e}")
-    if os.listdir(folder):
-        print(f"Warning: The folder {folder} is not empty after clearing!")
-
-# Clear the upload folder at app startup
-clear_upload_folder(UPLOAD_FOLDER)
-
-def allowed_file(filename):
-    """
-    Checks if the uploaded file is a .docx file.
-
-    Args:
-        filename (str): The name of the uploaded file.
-
-    Returns:
-        bool: True if the file is allowed, otherwise False.
-    """
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def replace_text_in_document(docx_path, replacements, output_path):
-    """
-    Replaces text in both the main content and text boxes (shapes) of a Word document.
-
-    Args:
-        docx_path (str): Path to the source .docx file.
-        replacements (dict): Dictionary of text replacements {old_text: new_text}.
-        output_path (str): Path to save the modified .docx file.
-    """
-    from docx import Document
-
-    # Load the document
-    doc = Document(docx_path)
-
-    # Namespace mapping
-    namespaces = {
-        'w': "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-        'wps': "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
-    }
-
-    # Replace text in paragraphs
-    for paragraph in doc.paragraphs:
-        for run in paragraph.runs:
-            for old_text, new_text in replacements.items():
-                if old_text in run.text:
-                    run.text = run.text.replace(old_text, new_text)
-
-    # Replace text in shapes (text boxes)
-    xpath_expression = etree.XPath('.//wps:txbx/w:txbxContent//w:t', namespaces=namespaces)
-    for shape in xpath_expression(doc.element.body):
-        if shape.text:
-            for old_text, new_text in replacements.items():
-                if old_text in shape.text:
-                    shape.text = shape.text.replace(old_text, new_text)
-
-    # Save the updated document
-    doc.save(output_path)
-
-
-
-@app.route('/', methods=['GET'])
-def index():
-    """
-    Displays the index page with a form to upload a Word template,
-    specify course code, date, and student names.
-    """
-    clear_upload_folder(app.config['UPLOAD_FOLDER'])  # Clear uploads folder
-    flash("The upload folder has been cleared for a new session.", "info")
-    today_str = date.today().strftime("%Y-%m-%d")
-    return render_template('index.html', today=today_str)
-
-@app.route('/', methods=['POST'])
-def process_form():
-    """
-    Handles form data: generates .docx files for each student.
-    """
-    kurskod = request.form.get('kurskod', '').strip()
-    datum = request.form.get('datum', '').strip() or date.today().strftime("%Y-%m-%d")
-
-    student_list = request.form.get('student_list', '').strip()
-    lines = [line.strip() for line in student_list.split('\n') if line.strip()]
-    if not lines:
-        flash("No student names provided!", "error")
-        return redirect(url_for('index'))
-
-    if 'docx_file' not in request.files:
-        flash("No Word template selected!", "error")
-        return redirect(url_for('index'))
-
-    file = request.files['docx_file']
-    if file.filename == '':
-        flash("No file selected.", "error")
-        return redirect(url_for('index'))
-
-    if not allowed_file(file.filename):
-        flash("Only .docx files are allowed!", "error")
-        return redirect(url_for('index'))
-
-    # Save the template in the cert_template/ folder
-    template_filename = secure_filename(file.filename)
-    template_path = os.path.join(TEMPLATE_FOLDER, template_filename)
-    file.save(template_path)
-
-    # Generate .docx files for each student
-    for student_name in lines:
-        out_filename_docx = f"Certifikat_{kurskod}_{student_name}_{datum}.docx"
-        out_path_docx = os.path.join(app.config['UPLOAD_FOLDER'], out_filename_docx)
-
-        replacements = {"NAMN": student_name, "KURSKOD": kurskod, "DATUM": datum}
-        replace_text_in_document(template_path, replacements, out_path_docx)
-
-    flash("DOCX files were successfully created!", "success")
-    all_files = sorted([f for f in os.listdir(UPLOAD_FOLDER)])
-    return render_template('done.html',
-                           docx_files=[f for f in all_files if f.endswith('.docx')],
-                           pdf_files=[f for f in all_files if f.endswith('.pdf')],
-                           pdf_available=False)
-
-@app.route('/convert_pdf', methods=['POST'])
-def convert_pdf():
-    folder = app.config['UPLOAD_FOLDER']
-    docx_files = [f for f in os.listdir(folder) if f.endswith('.docx')]
-
-    if not docx_files:
-        flash("No DOCX files to convert!", "error")
-        return redirect(url_for('index'))
-
-    # Test LibreOffice
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
+    path = os.path.join(data_dir, ".secret_key")
     try:
-        check_result = subprocess.run(["python", "convert_to_pdf.py", "--check"], capture_output=True, text=True, check=True)
-        app.logger.info(f"LibreOffice check passed: {check_result.stdout.strip()}")
-    except subprocess.CalledProcessError as e:
-        app.logger.error(f"LibreOffice check failed: {e.stderr.strip()}")
-        flash(f"LibreOffice check failed: {e.stderr.strip()}", "error")
-        return redirect(url_for('index'))
-    except Exception as e:
-        app.logger.error(f"Unexpected error during LibreOffice check: {e}")
-        flash("Unexpected error during LibreOffice check.", "error")
-        return redirect(url_for('index'))
-
-    # Kör PDF-konvertering
-    try:
-        conversion_result = subprocess.run(["python", "convert_to_pdf.py", folder], capture_output=True, text=True, check=True)
-        app.logger.info(f"PDF conversion output: {conversion_result.stdout.strip()}")
-        flash("All files were successfully converted to PDF!", "success")
-    except subprocess.CalledProcessError as e:
-        app.logger.error(f"PDF conversion failed: {e.stderr.strip()}")
-        flash(f"PDF conversion failed: {e.stderr.strip()}", "error")
-    except Exception as e:
-        app.logger.error(f"Unexpected error during PDF conversion: {e}")
-        flash("An unexpected error occurred during PDF conversion.", "error")
-
-    all_files = sorted([f for f in os.listdir(folder)])
-    pdf_files = [f for f in all_files if f.endswith('.pdf')]
-    docx_files = [f for f in all_files if f.endswith('.docx')]
-
-    return render_template('done.html', docx_files=docx_files, pdf_files=pdf_files)
+        with open(path, "x") as f:
+            f.write(secrets.token_hex(32))
+    except FileExistsError:
+        pass
+    with open(path) as f:
+        return f.read().strip()
 
 
+def safe_filename_part(value):
+    """Gör text säker i ett filnamn men behåller t.ex. å, ä och ö."""
+    value = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", value).strip().strip(".")
+    return re.sub(r"\s+", " ", value) or "okänd"
 
 
-@app.route('/download_template')
-def download_template():
-    """
-    Sends the example template to the user.
-    """
-    template_file = os.path.join(app.config['TEMPLATE_FOLDER'], 'exempelmall.docx')
-    if not os.path.exists(template_file):
-        flash("The example template does not exist!", "error")
-        return redirect(url_for('index'))
+def certificate_filename(cert, ext):
+    parts = ["Certifikat", cert["kurskod"], cert["student_name"], cert["datum"]]
+    return "_".join(safe_filename_part(p) for p in parts if p) + "." + ext
 
-    return send_file(template_file, as_attachment=True, download_name='exempelmall.docx')
 
-@app.route('/download_zip/<file_type>', methods=['POST'])
-def download_zip(file_type):
-    """
-    Packs all DOCX or PDF files into a ZIP file and sends it to the user.
-    """
-    files_to_zip = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(f'.{file_type}')]
-    if not files_to_zip:
-        flash(f"No {file_type.upper()} files to download!", "error")
-        return redirect(url_for('index'))
-
-    memory_file = io.BytesIO()
-    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for fname in files_to_zip:
-            file_path = os.path.join(UPLOAD_FOLDER, fname)
-            zf.write(file_path, arcname=fname)
-
-    memory_file.seek(0)
-    return send_file(
-        memory_file,
-        mimetype='application/zip',
-        as_attachment=True,
-        download_name=f'certifikat_{file_type}.zip'
+def create_app(config=None):
+    app = Flask(__name__)
+    app.config.update(
+        DATA_DIR=os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data")),
+        APP_PASSWORD=os.environ.get("APP_PASSWORD", ""),
+        PDF_PREWARM=True,
+        MAX_CONTENT_LENGTH=20 * 1024 * 1024,
+        # Andra sajter kan inte skicka POST (t.ex. radera intyg) med inloggningen.
+        SESSION_COOKIE_SAMESITE="Lax",
     )
+    if config:
+        app.config.update(config)
+
+    storage = Storage(app.config["DATA_DIR"])
+    app.config["STORAGE"] = storage
+    app.secret_key = _load_secret_key(storage.data_dir)
+
+    if storage.claim_once("example_template_seeded") and os.path.exists(EXAMPLE_TEMPLATE):
+        key = storage.new_key()
+        shutil.copyfile(EXAMPLE_TEMPLATE, os.path.join(storage.templates_dir, key + ".docx"))
+        storage.add_template("Exempelmall", "exempelmall.docx", key, find_placeholders(EXAMPLE_TEMPLATE))
+
+    # --- hjälpfunktioner --------------------------------------------------
+
+    def ensure_pdfs(pairs):
+        convert_to_pdf(pairs, storage.work_dir)
+
+    def prewarm(pairs):
+        """Skapar PDF:er i bakgrunden så att förhandsvisningen går snabbt."""
+        if not app.config["PDF_PREWARM"] or not find_soffice():
+            return
+
+        def run():
+            try:
+                ensure_pdfs(pairs)
+            except Exception:
+                log.exception("PDF-förkonvertering misslyckades")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def pdf_response(pdf_path, download_name, as_attachment=False):
+        return send_file(pdf_path, mimetype="application/pdf", as_attachment=as_attachment,
+                         download_name=download_name, max_age=0)
+
+    def preview_error(message, status):
+        return render_template("preview_error.html", message=message), status
+
+    def back_url(default_endpoint):
+        """Föregående sida om den ligger på samma webbplats, annars default."""
+        ref = request.referrer or ""
+        return ref if ref.startswith(request.host_url) else url_for(default_endpoint)
+
+    def selected_ids():
+        return [int(i) for i in request.form.getlist("ids") if i.isdigit()]
+
+    # --- inloggning (valfri, aktiveras med APP_PASSWORD) ------------------
+
+    @app.before_request
+    def require_login():
+        if not app.config["APP_PASSWORD"] or session.get("authenticated"):
+            return None
+        if request.endpoint in ("login", "static"):
+            return None
+        return redirect(url_for("login", next=request.full_path))
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if not app.config["APP_PASSWORD"]:
+            return redirect(url_for("index"))
+        if request.method == "POST":
+            # Jämför som bytes: compare_digest godtar bara ASCII i str (å/ä/ö gav 500).
+            if hmac.compare_digest(request.form.get("password", "").encode(),
+                                   app.config["APP_PASSWORD"].encode()):
+                session["authenticated"] = True
+                target = request.args.get("next", "")
+                # "//x" och "/\x" tolkas av webbläsare som en annan sajt.
+                local = target.startswith("/") and not target.startswith(("//", "/\\"))
+                return redirect(target if local else url_for("index"))
+            flash("Fel lösenord.", "danger")
+        return render_template("login.html")
+
+    @app.route("/logout", methods=["POST"])
+    def logout():
+        session.clear()
+        return redirect(url_for("index"))
+
+    # --- skapa intyg ------------------------------------------------------
+
+    @app.route("/", methods=["GET"])
+    def index():
+        templates = storage.list_templates()
+        selected = request.args.get("template", type=int)
+        if selected is None and templates:
+            selected = templates[0]["id"]
+        return render_template("index.html", templates=templates, selected=selected,
+                               today=date.today().isoformat())
+
+    def _read_generate_form():
+        template = storage.get_template(request.form.get("template_id", type=int) or 0)
+        kurskod = request.form.get("kurskod", "").strip()
+        datum = request.form.get("datum", "").strip() or date.today().isoformat()
+        names = [line.strip() for line in request.form.get("student_list", "").splitlines() if line.strip()]
+        return template, kurskod, datum, names
+
+    @app.route("/generate", methods=["POST"])
+    def generate():
+        template, kurskod, datum, names = _read_generate_form()
+        if not template:
+            flash("Välj en mall.", "danger")
+            return redirect(url_for("index"))
+        if not names:
+            flash("Ange minst ett namn.", "danger")
+            return redirect(url_for("index", template=template["id"]))
+
+        students = []
+        for name in names:
+            key = storage.new_key()
+            fill_template(storage.template_docx(template),
+                          {"NAMN": name, "DATUM": datum},
+                          os.path.join(storage.certificates_dir, key + ".docx"))
+            students.append((name, key))
+        batch_id, cert_ids = storage.add_batch(kurskod, datum, template["name"], students)
+
+        certs = storage.get_certificates(cert_ids)
+        prewarm([(storage.certificate_docx(c), storage.certificate_pdf(c)) for c in certs])
+        flash(f"{len(certs)} intyg skapades och har sparats.", "success")
+        return redirect(url_for("certificates", batch=batch_id))
+
+    @app.route("/preview-sample", methods=["POST"])
+    def preview_sample():
+        """Förhandsvisar mallen ifylld med första namnet, utan att spara något."""
+        template, _, datum, names = _read_generate_form()
+        if not template:
+            return preview_error("Välj en mall först.", 400)
+        name = names[0] if names else "Förnamn Efternamn"
+        key = "sample-" + storage.new_key()
+        docx_path = os.path.join(storage.work_dir, key + ".docx")
+        pdf_path = os.path.join(storage.work_dir, key + ".pdf")
+        try:
+            fill_template(storage.template_docx(template),
+                          {"NAMN": name, "DATUM": datum}, docx_path)
+            ensure_pdfs([(docx_path, pdf_path)])
+            with open(pdf_path, "rb") as f:
+                data = io.BytesIO(f.read())
+        except ConversionError as exc:
+            return preview_error(str(exc), 503)
+        finally:
+            for path in (docx_path, pdf_path):
+                if os.path.exists(path):
+                    os.remove(path)
+        return send_file(data, mimetype="application/pdf", download_name="forhandsvisning.pdf", max_age=0)
+
+    # --- mallar -----------------------------------------------------------
+
+    @app.route("/templates", methods=["GET"])
+    def templates():
+        return render_template("templates.html", templates=storage.list_templates())
+
+    @app.route("/templates", methods=["POST"])
+    def upload_template():
+        back = request.form.get("next") == "index"
+        file = request.files.get("docx_file")
+        if not file or not file.filename:
+            flash("Välj en Word-fil (.docx) att ladda upp.", "danger")
+            return redirect(url_for("index" if back else "templates"))
+        if not file.filename.lower().endswith(".docx"):
+            flash("Endast Word-filer (.docx) kan användas som mall.", "danger")
+            return redirect(url_for("index" if back else "templates"))
+
+        key = storage.new_key()
+        path = os.path.join(storage.templates_dir, key + ".docx")
+        file.save(path)
+        try:
+            placeholders = find_placeholders(path)
+        except (PackageNotFoundError, KeyError, ValueError):
+            os.remove(path)
+            flash("Filen kunde inte läsas som ett Word-dokument.", "danger")
+            return redirect(url_for("index" if back else "templates"))
+
+        name = request.form.get("name", "").strip() or os.path.splitext(file.filename)[0]
+        template_id = storage.add_template(name, secure_filename(file.filename) or "mall.docx", key, placeholders)
+        template = storage.get_template(template_id)
+        prewarm([(storage.template_docx(template), storage.template_pdf(template))])
+
+        if "NAMN" not in placeholders:
+            flash(f"Mallen ”{name}” sparades, men den innehåller ingen platshållare NAMN.", "warning")
+        else:
+            flash(f"Mallen ”{name}” sparades.", "success")
+        return redirect(url_for("index", template=template_id) if back else url_for("templates"))
+
+    def _get_template_or_404(template_id):
+        template = storage.get_template(template_id)
+        if not template:
+            abort(404)
+        return template
+
+    @app.route("/templates/<int:template_id>/preview")
+    def template_preview(template_id):
+        template = _get_template_or_404(template_id)
+        pdf_path = storage.template_pdf(template)
+        try:
+            ensure_pdfs([(storage.template_docx(template), pdf_path)])
+        except ConversionError as exc:
+            return preview_error(str(exc), 503)
+        return pdf_response(pdf_path, safe_filename_part(template["name"]) + ".pdf")
+
+    @app.route("/templates/<int:template_id>/download")
+    def template_download(template_id):
+        template = _get_template_or_404(template_id)
+        return send_file(storage.template_docx(template), as_attachment=True,
+                         download_name=safe_filename_part(template["name"]) + ".docx")
+
+    @app.route("/templates/<int:template_id>/delete", methods=["POST"])
+    def template_delete(template_id):
+        template = _get_template_or_404(template_id)
+        storage.delete_template(template_id)
+        flash(f"Mallen ”{template['name']}” togs bort. Redan skapade intyg finns kvar.", "success")
+        return redirect(url_for("templates"))
+
+    @app.route("/download_template")
+    def download_template():
+        """Exempelmallen (samma adress som i första versionen)."""
+        return send_file(EXAMPLE_TEMPLATE, as_attachment=True, download_name="exempelmall.docx")
+
+    # --- sparade intyg ----------------------------------------------------
+
+    @app.route("/certificates", methods=["GET"])
+    def certificates():
+        batch_id = request.args.get("batch", type=int)
+        query = request.args.get("q", "").strip()
+        return render_template("certificates.html",
+                               certificates=storage.list_certificates(batch_id, query),
+                               batches=storage.list_batches(), batch_id=batch_id, query=query)
+
+    def _get_certificate_or_404(cert_id):
+        cert = storage.get_certificate(cert_id)
+        if not cert:
+            abort(404)
+        return cert
+
+    @app.route("/certificates/<int:cert_id>/preview")
+    def certificate_preview(cert_id):
+        cert = _get_certificate_or_404(cert_id)
+        try:
+            ensure_pdfs([(storage.certificate_docx(cert), storage.certificate_pdf(cert))])
+        except ConversionError as exc:
+            return preview_error(str(exc), 503)
+        return pdf_response(storage.certificate_pdf(cert), certificate_filename(cert, "pdf"))
+
+    @app.route("/certificates/<int:cert_id>/download/<fmt>")
+    def certificate_download(cert_id, fmt):
+        cert = _get_certificate_or_404(cert_id)
+        if fmt == "docx":
+            return send_file(storage.certificate_docx(cert), as_attachment=True,
+                             download_name=certificate_filename(cert, "docx"))
+        if fmt != "pdf":
+            abort(404)
+        try:
+            ensure_pdfs([(storage.certificate_docx(cert), storage.certificate_pdf(cert))])
+        except ConversionError as exc:
+            flash(str(exc), "danger")
+            return redirect(url_for("certificates", batch=cert["batch_id"]))
+        return pdf_response(storage.certificate_pdf(cert), certificate_filename(cert, "pdf"), as_attachment=True)
+
+    @app.route("/certificates/download", methods=["POST"])
+    def certificates_download():
+        fmt = request.form.get("fmt", "pdf")
+        certs = storage.get_certificates(selected_ids())
+        if fmt not in ("pdf", "docx") or not certs:
+            flash("Markera minst ett intyg att ladda ner.", "warning")
+            return redirect(back_url("certificates"))
+        if len(certs) == 1:
+            return redirect(url_for("certificate_download", cert_id=certs[0]["id"], fmt=fmt))
+
+        if fmt == "pdf":
+            try:
+                ensure_pdfs([(storage.certificate_docx(c), storage.certificate_pdf(c)) for c in certs])
+            except ConversionError as exc:
+                flash(str(exc), "danger")
+                return redirect(back_url("certificates"))
+
+        buffer = io.BytesIO()
+        used = set()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for cert in certs:
+                name = certificate_filename(cert, fmt)
+                stem, n = name[: -len(fmt) - 1], 2
+                while name in used:
+                    name, n = f"{stem} ({n}).{fmt}", n + 1
+                used.add(name)
+                path = storage.certificate_pdf(cert) if fmt == "pdf" else storage.certificate_docx(cert)
+                zf.write(path, arcname=name)
+        buffer.seek(0)
+        return send_file(buffer, mimetype="application/zip", as_attachment=True,
+                         download_name=f"intyg_{fmt}_{date.today().isoformat()}.zip")
+
+    @app.route("/certificates/delete", methods=["POST"])
+    def certificates_delete():
+        return _delete_and_redirect(selected_ids())
+
+    @app.route("/certificates/<int:cert_id>/delete", methods=["POST"])
+    def certificate_delete(cert_id):
+        return _delete_and_redirect([cert_id])
+
+    def _delete_and_redirect(ids):
+        deleted = storage.delete_certificates(ids)
+        if deleted:
+            flash(f"{deleted} intyg togs bort.", "success")
+        else:
+            flash("Markera minst ett intyg att ta bort.", "warning")
+        return redirect(back_url("certificates"))
+
+    @app.errorhandler(413)
+    def too_large(_):
+        flash("Filen är för stor (max 20 MB).", "danger")
+        return redirect(back_url("index"))
+
+    return app
+
+
+app = create_app()
 
 if __name__ == "__main__":
     app.run(debug=True)

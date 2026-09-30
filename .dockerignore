@@ -6,5 +6,12 @@ __pycache__
 *.tmp
 .git
 .vscode
+.venv/
+venv/
+data/
 uploads/
-cert_template/
+tests/
+.pytest_cache/
+# Mallarna i cert_template/ följer inte med, förutom exempelmallen.
+cert_template/*
+!cert_template/exempelmall.docx

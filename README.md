@@ -1,84 +1,70 @@
-# Certificate Generator
+# Certificate Generator (v2)
 
-## Overview
-Certificate Generator is a Python-based web application designed to simplify the creation of personalized certificates. Users can upload a Word template with placeholders, generate certificates dynamically, and convert them to PDFs. The app is ideal for educators, event organizers, and anyone needing batch certificate generation.
+A Flask web app that creates personalised course certificates from Word templates and converts them to PDF with LibreOffice.
 
----
+This is the new version. The original app (repo `turbomacka/course_certificates`, commit `56298e4`) keeps running unchanged at https://course-certificates.onrender.com/.
 
 ## Features
-- **Dynamic Text Replacement**: Replace placeholders like `NAMN` and `DATUM` in Word templates.
-- **Batch Processing**: Generate certificates for multiple recipients using a single template and list of names.
-- **PDF Conversion**: Convert DOCX certificates to PDF using LibreOffice in headless mode.
-- **Progress Tracking**: Real-time progress updates during PDF conversion with humorous messages.
-- **ZIP Downloads**: Download all generated DOCX or PDF files as a ZIP archive.
 
----
+- **Template library** (`/templates`): upload, preview, download and delete Word templates. Uploaded templates are saved for reuse. The placeholders found in each template are shown in the list. An example template is added on first start.
+- **Create certificates** (`/`): pick a saved template (or upload a new one), enter course code, date and names (one per line). *Förhandsvisa med första namnet* shows the certificate for the first name as a PDF before anything is saved.
+- **Saved certificates** (`/certificates`): filter by batch, search by name, preview in a modal, download one at a time as PDF or DOCX, download selected ones as a ZIP, and delete single or selected certificates.
+- **Placeholders**: `NAMN` and `DATUM` are replaced in body text, tables, headers, footers and text boxes, even when Word has split a placeholder over several runs. The formatting of the placeholder's first character is kept. The course code is not a placeholder; it is only used in file names (`Certifikat_<kurskod>_<namn>_<datum>.pdf`).
+- **PDF**: LibreOffice converts in chunks of five files, one conversion at a time, so the server does not run out of memory. PDFs are created in the background right after generation, so previews are fast.
 
-## Prerequisites
-- **Python Version**: Python 3.8 or later.
-- **Dependencies**: Install via `requirements.txt`.
-- **LibreOffice**: Required for DOCX-to-PDF conversion.
+## Configuration
 
----
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATA_DIR` | `./data` (`/var/data` in Docker) | SQLite database, saved templates and certificates. |
+| `APP_PASSWORD` | empty (no login) | If set, every page requires this password. |
+| `SECRET_KEY` | generated and stored in `DATA_DIR/.secret_key` | Session signing key. |
 
-## Installation
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/turbomacka/certificate-generator.git
-   cd certificate-generator
-Set up a virtual environment:
+Set values in the environment or in the Render dashboard. Never commit them.
 
-bash
-Kopiera kod
-python3 -m venv venv
-source venv/bin/activate  # For Linux/MacOS
-venv\Scripts\activate     # For Windows
-Install required dependencies:
+> **Note:** saved certificates contain student names. Without `APP_PASSWORD`, anyone with the URL can list and download them. Set `APP_PASSWORD` for any public deployment.
 
-bash
-Kopiera kod
-pip install -r requirements.txt
-Verify LibreOffice installation:
+## Running locally
 
-bash
-Kopiera kod
-libreoffice --version
-Usage
-Start the Application:
+Tests and the web UI run on Windows, but PDF preview and conversion need LibreOffice, which is easiest to get through Docker.
 
-bash
-Kopiera kod
-python app.py
-Access the Web Interface: Open your browser and navigate to http://127.0.0.1:5000.
+```bash
+# Tests without LibreOffice (the PDF test is skipped)
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements-dev.txt   # Linux/macOS: .venv/bin/python
+.venv/Scripts/python -m pytest -q tests
 
-Upload Template and Enter Data:
+# Full app with LibreOffice
+docker build -t inb-certs:v2 .
+docker run --rm -p 5055:5000 -v inb-certs-data:/var/data inb-certs:v2
+# open http://localhost:5055
+```
 
-Upload a Word template containing NAMN and DATUM placeholders.
-Enter course code, date, and names (one per line).
-Generate and Download Certificates:
+To run the whole test suite, including PDF conversion, inside the container:
 
-Generate DOCX certificates.
-Convert to PDF and download individual files or ZIP archives.
-Project Structure
-app.py: Main application logic using Flask.
-convert_to_pdf.py: Handles DOCX-to-PDF conversion using LibreOffice.
-templates/: Contains HTML templates for the web interface (index.html, done.html, progress.html).
-uploads/: Directory where generated files are temporarily stored.
-cert_template/: Directory for storing uploaded Word templates.
-Example Workflow
-Upload a Word template with placeholders.
-Enter necessary data (e.g., names, course codes, dates).
-Generate certificates in DOCX format.
-Convert to PDF and download as needed.
-Author
-Created by Turbomacka. For inquiries or suggestions, feel free to contact the author through GitHub.
+```bash
+docker run --rm -v "$PWD/tests:/app/tests:ro" -v "$PWD/cert_template:/app/cert_template:ro" \
+  inb-certs:v2 sh -c "pip install -q pytest && python -m pytest -q tests"
+```
 
-Contributions
-Contributions, issues, and feature requests are welcome. Please fork the repository, make changes, and submit a pull request.
+## Deploying on Render
 
-License
-This project is licensed under the MIT License. See the LICENSE file for more details.
+`render.yaml` is a Blueprint for a **separate** Docker web service (`inb-course-certificates`, branch `v2`). It does not touch the old service. Create it with:
 
-Notes
-Ensure your Word template uses simple, compatible formatting to maintain fidelity during PDF conversion.
-LibreOffice must be installed and added to the system path for PDF conversion to work.
+https://render.com/deploy?repo=https://github.com/turbomacka/inb_course_certificates/tree/v2
+
+Render asks for `APP_PASSWORD` and generates `SECRET_KEY`. The Blueprint uses the Starter plan with a 1 GB disk at `/var/data`, because the free plan has no persistent disk and would lose templates and certificates on every restart. Change the password later under the service's **Environment** tab.
+
+## Project structure
+
+- `app.py`: Flask routes (create, templates, certificates, login).
+- `storage.py`: SQLite metadata and file storage under `DATA_DIR`.
+- `docx_fill.py`: placeholder detection and replacement in `.docx` files.
+- `pdf_convert.py`: LibreOffice conversion (chunked and serialised).
+- `templates/`: Jinja/Bootstrap pages.
+- `cert_template/exempelmall.docx`: the example template seeded on first start.
+- `tests/`: pytest suite.
+
+## Author
+
+Created by Marcus S. Hjärne (Turbomacka).

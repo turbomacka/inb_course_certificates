@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Sparade intyg – Certifikatgenerator{% endblock %}
+{% block content %}
+<h1 class="h4 mb-3">Sparade intyg</h1>
+
+<form method="GET" action="{{ url_for('certificates') }}" class="row g-2 mb-3" aria-label="Filtrera intyg">
+    <div class="col-md-6">
+        <label for="batch" class="visually-hidden">Körning</label>
+        <select id="batch" name="batch" class="form-select" onchange="this.form.submit()">
+            <option value="">Alla körningar</option>
+            {% for b in batches %}
+            <option value="{{ b.id }}" {% if b.id == batch_id %}selected{% endif %}>
+                {{ b.kurskod or '(ingen kurskod)' }} · {{ b.datum }} · {{ b.template_name }} · {{ b.count }} st · skapad {{ b.created_at }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-md-4">
+        <label for="q" class="visually-hidden">Sök</label>
+        <input type="search" id="q" name="q" class="form-control" value="{{ query }}" placeholder="Sök namn eller kurskod">
+    </div>
+    <div class="col-md-2 d-grid">
+        <button type="submit" class="btn btn-outline-secondary">Sök</button>
+    </div>
+</form>
+
+{% if certificates %}
+<form method="POST" action="{{ url_for('certificates_download') }}" id="bulkForm">
+    <div class="card shadow-sm">
+        <div class="card-header bg-white d-flex flex-wrap gap-2 align-items-center">
+            <span class="small text-muted me-auto" id="selectionInfo">0 markerade av {{ certificates|length }}</span>
+            <button type="submit" name="fmt" value="pdf" class="btn btn-sm btn-primary" data-needs-selection disabled>Ladda ner markerade (PDF)</button>
+            <button type="submit" name="fmt" value="docx" class="btn btn-sm btn-outline-primary" data-needs-selection disabled>Ladda ner markerade (DOCX)</button>
+            <button type="submit" formaction="{{ url_for('certificates_delete') }}" class="btn btn-sm btn-outline-danger"
+                    data-needs-selection data-confirm="Ta bort de markerade intygen? Det går inte att ångra." disabled>Ta bort markerade</button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead>
+                <tr>
+                    <th scope="col" style="width: 2.5rem;">
+                        <input type="checkbox" class="form-check-input" id="selectAll" aria-label="Markera alla">
+                    </th>
+                    <th scope="col">Namn</th>
+                    <th scope="col">Kurskod</th>
+                    <th scope="col">Datum</th>
+                    <th scope="col" class="d-none d-md-table-cell">Mall</th>
+                    <th scope="col" class="text-end">Åtgärder</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for c in certificates %}
+                <tr>
+                    <td><input type="checkbox" class="form-check-input" name="ids" value="{{ c.id }}" aria-label="Markera {{ c.student_name }}"></td>
+                    <td class="fw-semibold">{{ c.student_name }}</td>
+                    <td>{{ c.kurskod }}</td>
+                    <td>{{ c.datum }}</td>
+                    <td class="d-none d-md-table-cell small text-muted">{{ c.template_name }}</td>
+                    <td class="text-end actions">
+                        <button type="button" class="btn btn-sm btn-outline-primary"
+                                data-preview-url="{{ url_for('certificate_preview', cert_id=c.id) }}"
+                                data-preview-title="{{ c.student_name }} – {{ c.kurskod }}" data-preview-group="certs">Förhandsvisa</button>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('certificate_download', cert_id=c.id, fmt='pdf') }}">PDF</a>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('certificate_download', cert_id=c.id, fmt='docx') }}">DOCX</a>
+                        <button type="submit" formaction="{{ url_for('certificate_delete', cert_id=c.id) }}"
+                                class="btn btn-sm btn-outline-danger"
+                                data-confirm="Ta bort intyget för {{ c.student_name }}?">Ta bort</button>
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</form>
+<p class="small text-muted mt-2">PDF skapas automatiskt i bakgrunden efter att intygen skapats. Vid många intyg kan den första nedladdningen ta en stund.</p>
+{% else %}
+<div class="alert alert-secondary">
+    Inga sparade intyg{% if query or batch_id %} matchar filtret{% endif %}.
+    <a href="{{ url_for('index') }}" class="alert-link">Skapa intyg</a>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const form = document.getElementById('bulkForm');
+    if (!form) return;
+    const boxes = [...form.querySelectorAll('input[name="ids"]')];
+    const selectAll = document.getElementById('selectAll');
+    const info = document.getElementById('selectionInfo');
+
+    function update() {
+        const n = boxes.filter(b => b.checked).length;
+        info.textContent = `${n} markerade av ${boxes.length}`;
+        form.querySelectorAll('[data-needs-selection]').forEach(b => b.disabled = n === 0);
+        selectAll.checked = n === boxes.length;
+        selectAll.indeterminate = n > 0 && n < boxes.length;
+    }
+    selectAll.addEventListener('change', () => { boxes.forEach(b => b.checked = selectAll.checked); update(); });
+    boxes.forEach(b => b.addEventListener('change', update));
+    update();
+})();
+</script>
+{% endblock %}

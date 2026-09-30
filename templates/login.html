@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Logga in – Certifikatgenerator{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-5 col-lg-4">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h1 class="h5 mb-3">Logga in</h1>
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Lösenord</label>
+                        <input type="password" id="password" name="password" class="form-control" required autofocus>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Logga in</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
