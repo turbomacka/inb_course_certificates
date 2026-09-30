@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Sparade intyg – Certifikatgenerator{% endblock %}
+{% block content %}
+<h1 class="h4 mb-3">Sparade intyg</h1>
+
+<form method="GET" action="{{ url_for('certificates') }}" class="row g-2 mb-3" aria-label="Filtrera intyg">
+    <div class="col-md-6">
+        <label for="batch" class="visually-hidden">Körning</label>
+        <select id="batch" name="batch" class="form-select" onchange="this.form.submit()">
+            <option value="">Alla körningar</option>
+        </select>
+    </div>
+    <div class="col-md-4">
+        <label for="q" class="visually-hidden">Sök</label>
+        <input type="search" id="q" name="q" class="form-control" placeholder="Sök namn eller kurskod">
+    </div>
+    <div class="col-md-2 d-grid">
+        <button type="submit" class="btn btn-outline-secondary">Sök</button>
+    </div>
+</form>
+
+<div class="card shadow-sm" id="certsCard" hidden>
+    <div class="card-header bg-white d-flex flex-wrap gap-2 align-items-center">
+        <span class="small text-muted me-auto" id="selectionInfo"></span>
+        <button type="button" class="btn btn-sm btn-primary" data-bulk="pdf" disabled>Ladda ner markerade (PDF)</button>
+        <button type="button" class="btn btn-sm btn-outline-primary" data-bulk="docx" disabled>Ladda ner markerade (DOCX)</button>
+        <button type="button" class="btn btn-sm btn-outline-danger" data-bulk="delete" disabled>Ta bort markerade</button>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover mb-0">
+            <thead>
+            <tr>
+                <th scope="col" style="width: 2.5rem;">
+                    <input type="checkbox" class="form-check-input" id="selectAll" aria-label="Markera alla">
+                </th>
+                <th scope="col">Namn</th>
+                <th scope="col">Kurskod</th>
+                <th scope="col">Datum</th>
+                <th scope="col" class="d-none d-md-table-cell">Mall</th>
+                <th scope="col" class="text-end">Åtgärder</th>
+            </tr>
+            </thead>
+            <tbody id="certsBody"></tbody>
+        </table>
+    </div>
+</div>
+<div class="alert alert-secondary" id="noCerts" hidden>
+    <span id="noCertsText">Inga sparade intyg.</span>
+    <a href="{{ url_for('index') }}" class="alert-link">Skapa intyg</a>
+</div>
+<p class="small text-muted mt-2">Intygen sparas bara i den här webbläsaren på den här datorn, inte på servern. Rensar du webbläsarens data försvinner de, så ladda ner dem du vill behålla.</p>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="{{ url_for('static', filename='web.js') }}"></script>
+<script>
+(function () {
+    const { el } = Web;
+    const params = new URLSearchParams(location.search);
+    const batchId = Number(params.get('batch')) || null;
+    const query = (params.get('q') || '').trim();
+    const body = document.getElementById('certsBody');
+    const selectAll = document.getElementById('selectAll');
+    const info = document.getElementById('selectionInfo');
+    document.getElementById('q').value = query;
+
+    const boxes = () => [...body.querySelectorAll('input[name="ids"]')];
+    const selectedIds = () => boxes().filter(b => b.checked).map(b => Number(b.value));
+
+    function update() {
+        const all = boxes();
+        const n = all.filter(b => b.checked).length;
+        info.textContent = `${n} markerade av ${all.length}`;
+        document.querySelectorAll('[data-bulk]').forEach(b => b.disabled = n === 0);
+        selectAll.checked = all.length > 0 && n === all.length;
+        selectAll.indeterminate = n > 0 && n < all.length;
+    }
+
+    async function remove(ids, message) {
+        if (!confirm(message)) return;
+        const deleted = await Web.deleteCertificates(ids);
+        Web.showAlert(`${deleted} intyg togs bort.`, 'success');
+        await render();
+    }
+
+    function row(c) {
+        const preview = el('button', {
+            type: 'button', class: 'btn btn-sm btn-outline-primary',
+            'data-preview-url': '', 'data-preview-title': `${c.studentName} – ${c.kurskod}`, 'data-preview-group': 'certs',
+        }, 'Förhandsvisa');
+        preview.getPreviewUrl = async () => Web.objectUrl(c.pdf);
+
+        return el('tr', {},
+            el('td', {}, el('input', {
+                type: 'checkbox', class: 'form-check-input', name: 'ids', value: c.id,
+                'aria-label': `Markera ${c.studentName}`, onchange: update,
+            })),
+            el('td', { class: 'fw-semibold' }, c.studentName),
+            el('td', {}, c.kurskod),
+            el('td', {}, c.datum),
+            el('td', { class: 'd-none d-md-table-cell small text-muted' }, c.templateName),
+            el('td', { class: 'text-end actions' },
+                preview, ' ',
+                el('button', { type: 'button', class: 'btn btn-sm btn-outline-secondary',
+                    onclick: () => Web.download(c.pdf, Web.certificateFilename(c, 'pdf')) }, 'PDF'), ' ',
+                el('button', { type: 'button', class: 'btn btn-sm btn-outline-secondary',
+                    onclick: () => Web.download(c.docx, Web.certificateFilename(c, 'docx')) }, 'DOCX'), ' ',
+                el('button', { type: 'button', class: 'btn btn-sm btn-outline-danger',
+                    onclick: () => remove([c.id], `Ta bort intyget för ${c.studentName}?`) }, 'Ta bort')));
+    }
+
+    async function render() {
+        Web.releaseObjectUrls();
+        const [batches, certs] = await Promise.all([Web.listBatches(), Web.listCertificates(batchId, query)]);
+        const batchSelect = document.getElementById('batch');
+        batchSelect.replaceChildren(new Option('Alla körningar', ''), ...batches.map(b => new Option(
+            `${b.kurskod || '(ingen kurskod)'} · ${b.datum} · ${b.templateName} · ${b.count} st · skapad ${b.createdAt}`, b.id)));
+        batchSelect.value = batches.some(b => b.id === batchId) ? String(batchId) : '';
+
+        body.replaceChildren(...certs.map(row));
+        document.getElementById('certsCard').hidden = !certs.length;
+        document.getElementById('noCerts').hidden = certs.length > 0;
+        document.getElementById('noCertsText').textContent =
+            `Inga sparade intyg${query || batchId ? ' matchar filtret' : ''}.`;
+        update();
+    }
+
+    selectAll.addEventListener('change', () => { boxes().forEach(b => b.checked = selectAll.checked); update(); });
+
+    document.querySelectorAll('[data-bulk]').forEach(button => button.addEventListener('click', async () => {
+        const ids = selectedIds();
+        if (!ids.length) return;
+        const action = button.dataset.bulk;
+        if (action === 'delete') {
+            await remove(ids, 'Ta bort de markerade intygen? Det går inte att ångra.');
+            return;
+        }
+        button.disabled = true;
+        try {
+            await Web.downloadCertificates(await Web.getCertificates(ids), action);
+        } catch (error) {
+            Web.showAlert(`Nedladdningen misslyckades: ${error.message}`, 'danger');
+        } finally {
+            button.disabled = false;
+        }
+    }));
+
+    render().catch(error => Web.showAlert(error.message, 'danger'));
+})();
+</script>
+{% endblock %}

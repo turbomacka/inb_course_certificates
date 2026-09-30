@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Mallar – Certifikatgenerator{% endblock %}
+{% block content %}
+<h1 class="h4 mb-3">Mallar</h1>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <form id="uploadForm" class="row g-2 align-items-end" aria-label="Ladda upp ny mall">
+            <div class="col-md-4">
+                <label for="name" class="form-label">Namn på mallen (valfritt)</label>
+                <input type="text" id="name" name="name" class="form-control" placeholder="t.ex. HPC012 höst">
+            </div>
+            <div class="col-md-5">
+                <label for="docx_file" class="form-label">Word-fil (.docx)</label>
+                <input type="file" id="docx_file" name="docx_file" class="form-control" accept=".docx" required>
+            </div>
+            <div class="col-md-3 d-grid">
+                <button type="submit" class="btn btn-primary">Ladda upp och spara</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm" id="templatesCard" hidden>
+    <div class="table-responsive">
+        <table class="table mb-0">
+            <thead>
+            <tr>
+                <th scope="col">Namn</th>
+                <th scope="col">Platshållare</th>
+                <th scope="col">Uppladdad</th>
+                <th scope="col" class="text-end">Åtgärder</th>
+            </tr>
+            </thead>
+            <tbody id="templatesBody"></tbody>
+        </table>
+    </div>
+</div>
+<div class="alert alert-secondary" id="noTemplates" hidden>Det finns inga sparade mallar ännu.</div>
+<p class="small text-muted mt-2">Mallarna sparas bara i den här webbläsaren på den här datorn. Rensar du webbläsarens data försvinner de.</p>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="{{ url_for('static', filename='web.js') }}"></script>
+<script>
+(function () {
+    const { el } = Web;
+    const body = document.getElementById('templatesBody');
+    const uploadForm = document.getElementById('uploadForm');
+
+    function row(t) {
+        const preview = el('button', {
+            type: 'button', class: 'btn btn-sm btn-outline-primary',
+            'data-preview-url': '', 'data-preview-title': `Mall: ${t.name}`, 'data-preview-group': 'templates',
+        }, 'Förhandsvisa');
+        preview.getPreviewUrl = async () => Web.objectUrl(await Web.templatePdf(t.id));
+
+        const remove = el('button', {
+            type: 'button', class: 'btn btn-sm btn-outline-danger',
+            onclick: async () => {
+                if (!confirm(`Ta bort mallen ”${t.name}”? Redan skapade intyg påverkas inte.`)) return;
+                await Web.deleteTemplate(t.id);
+                Web.showAlert(`Mallen ”${t.name}” togs bort. Redan skapade intyg finns kvar.`, 'success');
+                render();
+            },
+        }, 'Ta bort');
+
+        const badges = t.placeholders.length
+            ? t.placeholders.map(p => el('span', { class: 'badge text-bg-secondary me-1' }, p))
+            : [el('span', { class: 'badge text-bg-warning' }, 'Inga')];
+
+        return el('tr', {},
+            el('td', {}, el('div', { class: 'fw-semibold' }, t.name), el('div', { class: 'small text-muted' }, t.filename)),
+            el('td', {}, ...badges),
+            el('td', { class: 'small' }, t.createdAt),
+            el('td', { class: 'text-end actions' },
+                preview, ' ',
+                el('a', { class: 'btn btn-sm btn-outline-secondary', href: `{{ url_for('index') }}?template=${t.id}` }, 'Använd'), ' ',
+                el('button', {
+                    type: 'button', class: 'btn btn-sm btn-outline-secondary',
+                    onclick: () => Web.download(t.docx, `${Web.safeFilenamePart(t.name)}.docx`),
+                }, 'Ladda ner'), ' ',
+                remove));
+    }
+
+    async function render() {
+        Web.releaseObjectUrls();
+        const templates = await Web.listTemplates();
+        body.replaceChildren(...templates.map(row));
+        document.getElementById('templatesCard').hidden = !templates.length;
+        document.getElementById('noTemplates').hidden = templates.length > 0;
+    }
+
+    uploadForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const file = uploadForm.docx_file.files[0];
+        if (!file) return;
+        const button = uploadForm.querySelector('button');
+        button.disabled = true;
+        try {
+            if (!file.name.toLowerCase().endsWith('.docx')) throw new Error('Endast Word-filer (.docx) kan användas som mall.');
+            const template = await Web.addTemplate(file, uploadForm.elements.name.value.trim());
+            uploadForm.reset();
+            if (!template.placeholders.includes('NAMN')) {
+                Web.showAlert(`Mallen ”${template.name}” sparades, men den innehåller ingen platshållare NAMN.`, 'warning');
+            } else {
+                Web.showAlert(`Mallen ”${template.name}” sparades.`, 'success');
+            }
+            await render();
+        } catch (error) {
+            Web.showAlert(error.message, 'danger');
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    (async () => {
+        try {
+            await Web.ensureExampleTemplate();
+            await render();
+        } catch (error) {
+            Web.showAlert(error.message, 'danger');
+        }
+    })();
+})();
+</script>
+{% endblock %}

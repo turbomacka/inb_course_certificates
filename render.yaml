@@ -1,22 +1,20 @@
-# Render Blueprint för v2. Skapar en egen tjänst; den gamla tjänsten
-# (course-certificates.onrender.com) påverkas inte.
+# Render Blueprint för webbversionen av v2 (gratisnivå). Skapar en egen tjänst;
+# den gamla tjänsten (course-certificates.onrender.com) påverkas inte.
+# STORAGE_MODE=browser: mallar och intyg sparas i användarens webbläsare, så
+# ingen persistent disk behövs.
 services:
   - type: web
     name: inb-course-certificates
     runtime: docker
     repo: https://github.com/turbomacka/inb_course_certificates
     branch: v2
-    # Gratisnivån saknar persistent disk: sparade mallar och intyg skulle
-    # försvinna varje gång tjänsten somnar eller deployas om.
-    plan: starter
+    plan: free
     region: frankfurt
     healthCheckPath: /login
     envVars:
+      - key: STORAGE_MODE
+        value: browser
       - key: APP_PASSWORD
         sync: false # Render frågar efter värdet när tjänsten skapas
       - key: SECRET_KEY
         generateValue: true
-    disk:
-      name: data
-      mountPath: /var/data
-      sizeGB: 1

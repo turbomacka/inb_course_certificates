@@ -9,7 +9,7 @@ import pdf_convert
 from app import create_app, safe_filename_part
 from conftest import EXAMPLE
 
-needs_libreoffice = pytest.mark.skipif(not pdf_convert.find_soffice(), reason="LibreOffice saknas")
+needs_converter = pytest.mark.skipif(not pdf_convert.find_converter(), reason="Varken Word eller LibreOffice finns")
 
 
 def upload(client, path=EXAMPLE, name="Testmall", filename="mall.docx", **extra):
@@ -146,11 +146,11 @@ def test_deleting_template_keeps_certificates(client, storage):
     assert client.get(f"/certificates/{cert['id']}/download/docx").status_code == 200
 
 
-def test_preview_without_libreoffice_shows_message(client, storage, monkeypatch):
-    monkeypatch.setattr(pdf_convert, "find_soffice", lambda: None)
+def test_preview_without_converter_shows_message(client, storage, monkeypatch):
+    monkeypatch.setattr(pdf_convert, "find_converter", lambda: None)
     template_id = storage.list_templates()[0]["id"]
     response = client.get(f"/templates/{template_id}/preview")
-    assert response.status_code == 503 and "LibreOffice" in response.get_data(as_text=True)
+    assert response.status_code == 503 and "Word eller LibreOffice" in response.get_data(as_text=True)
     response = client.post("/preview-sample", data={"template_id": template_id, "student_list": "Anna"})
     assert response.status_code == 503
     assert [f for f in os.listdir(storage.work_dir) if f.startswith("sample-")] == []
@@ -188,7 +188,7 @@ def test_safe_filename_part():
     assert safe_filename_part("../..") == "okänd"
 
 
-@needs_libreoffice
+@needs_converter
 def test_previews_and_pdf_zip(client, storage):
     template_id = storage.list_templates()[0]["id"]
     response = client.get(f"/templates/{template_id}/preview")

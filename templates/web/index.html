@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+    <div class="col-lg-5">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h1 class="h4 mb-3">Skapa intyg</h1>
+
+                <div class="alert alert-warning" id="noTemplates" hidden>Det finns inga sparade mallar ännu. Ladda upp en mall nedan.</div>
+
+                <form id="generateForm" aria-label="Skapa intyg">
+                    <div class="mb-3">
+                        <label for="template_id" class="form-label">Mall</label>
+                        <select id="template_id" name="template_id" class="form-select" required></select>
+                        <div class="form-text">
+                            <a href="#" data-bs-toggle="collapse" data-bs-target="#uploadBox" aria-expanded="false" aria-controls="uploadBox">Ladda upp ny mall</a>
+                            &middot; <a href="{{ url_for('templates') }}">Hantera mallar</a>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="kurskod" class="form-label">Kurskod</label>
+                        <input type="text" id="kurskod" name="kurskod" class="form-control"
+                               placeholder="Ange kurskod (t.ex. HPC012)" aria-describedby="kurskodHelp" required>
+                        <div id="kurskodHelp" class="form-text">Används i filnamnen, inte i intyget.</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="datum" class="form-label">Datum</label>
+                        <input type="date" id="datum" name="datum" class="form-control" value="{{ today }}" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="student_list" class="form-label">Namn (ett per rad)</label>
+                        <textarea id="student_list" name="student_list" class="form-control" rows="6"
+                                  placeholder="Skriv varje namn på en ny rad …" required></textarea>
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-outline-primary" id="sampleButton">Förhandsvisa med första namnet</button>
+                        <button type="submit" class="btn btn-primary" id="generateButton">Skapa och spara intyg</button>
+                    </div>
+
+                    <div class="mt-3" id="progressBox" hidden>
+                        <div class="progress" role="progressbar" aria-label="Förlopp" aria-valuemin="0" aria-valuemax="100">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" id="progressBar" style="width: 0%"></div>
+                        </div>
+                        <div class="small text-muted mt-1" id="progressText" aria-live="polite"></div>
+                    </div>
+                </form>
+
+                <div class="collapse mt-4" id="uploadBox">
+                    <form id="uploadForm" class="border rounded p-3 bg-light" aria-label="Ladda upp ny mall">
+                        <h2 class="h6">Ladda upp ny mall</h2>
+                        <div class="mb-2">
+                            <label for="upload_name" class="form-label small">Namn på mallen (valfritt)</label>
+                            <input type="text" id="upload_name" name="name" class="form-control form-control-sm">
+                        </div>
+                        <div class="mb-2">
+                            <label for="docx_file" class="form-label small">Word-fil (.docx)</label>
+                            <input type="file" id="docx_file" name="docx_file" class="form-control form-control-sm" accept=".docx" required>
+                        </div>
+                        <button type="submit" class="btn btn-sm btn-secondary">Spara mall</button>
+                    </form>
+                </div>
+
+                <section class="alert alert-info mt-4 mb-0 small">
+                    <h2 class="h6">Platshållare i Word-mallen</h2>
+                    <ul class="mb-2">
+                        <li><strong>NAMN</strong> ersätts med deltagarens namn.</li>
+                        <li><strong>DATUM</strong> ersätts med datumet ovan.</li>
+                    </ul>
+                    Är du osäker? Ladda ner en <a href="{{ url_for('download_template') }}" class="alert-link">exempelmall</a>.
+                </section>
+
+                <p class="small text-muted mt-3 mb-0">Mallar och intyg sparas bara i den här webbläsaren, inte på servern.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-7">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <span class="fw-semibold" id="previewLabel">Förhandsvisning av mallen</span>
+                <button type="button" class="btn btn-sm btn-link" id="showTemplateButton" hidden>Visa mallen igen</button>
+            </div>
+            <div class="preview-wrap" id="pagePreviewWrap">
+                <iframe class="preview-frame" id="pagePreview" style="height: 78vh;" title="Förhandsvisning"></iframe>
+                <div class="preview-loading">
+                    <div class="spinner-border" role="status" aria-hidden="true"></div>
+                    <span>Skapar förhandsvisning …</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="{{ url_for('static', filename='web.js') }}"></script>
+<script>
+(function () {
+    const select = document.getElementById('template_id');
+    const frame = document.getElementById('pagePreview');
+    const wrap = document.getElementById('pagePreviewWrap');
+    const label = document.getElementById('previewLabel');
+    const showTemplate = document.getElementById('showTemplateButton');
+    const form = document.getElementById('generateForm');
+    const uploadForm = document.getElementById('uploadForm');
+    const progressBox = document.getElementById('progressBox');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    let previewUrl = null;
+    let previewToken = 0;
+
+    function showPdf(blob) {
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = URL.createObjectURL(blob);
+        frame.removeAttribute('srcdoc');
+        loadPreview(frame, wrap, previewUrl);
+    }
+
+    function showMessage(message) {
+        wrap.classList.remove('loading');
+        frame.removeAttribute('src');
+        const p = document.createElement('p');
+        p.style.cssText = 'font-family:sans-serif;padding:1rem';
+        p.textContent = message;
+        frame.srcdoc = p.outerHTML;
+    }
+
+    async function withPreview(label, load) {
+        const token = ++previewToken;
+        wrap.classList.add('loading');
+        try {
+            const blob = await load();
+            if (token === previewToken) showPdf(blob);
+        } catch (error) {
+            if (token === previewToken) showMessage(`${label} kunde inte skapas: ${error.message}`);
+        }
+    }
+
+    function previewTemplate() {
+        label.textContent = 'Förhandsvisning av mallen';
+        showTemplate.hidden = true;
+        if (!select.value) {
+            showMessage('Ingen mall vald.');
+            return;
+        }
+        withPreview('Förhandsvisningen', () => Web.templatePdf(Number(select.value)));
+    }
+
+    async function previewSample() {
+        if (!select.value) return;
+        label.textContent = 'Exempel med första namnet';
+        showTemplate.hidden = false;
+        const names = form.student_list.value.split('\n').map(s => s.trim()).filter(Boolean);
+        withPreview('Förhandsvisningen', async () => {
+            const template = await Web.get('templates', Number(select.value));
+            return Web.previewPdf(template.docx, names[0] || 'Förnamn Efternamn', form.datum.value);
+        });
+    }
+
+    async function loadTemplates(selectedId) {
+        const templates = await Web.listTemplates();
+        select.replaceChildren(...templates.map(t => new Option(t.name, t.id)));
+        document.getElementById('noTemplates').hidden = templates.length > 0;
+        if (selectedId && templates.some(t => t.id === selectedId)) select.value = String(selectedId);
+    }
+
+    function setBusy(busy) {
+        form.querySelectorAll('button, input, select, textarea').forEach(e => e.disabled = busy);
+        window.onbeforeunload = busy ? () => true : null;
+    }
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const names = form.student_list.value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (!select.value) { Web.showAlert('Välj en mall.', 'danger'); return; }
+        if (!names.length) { Web.showAlert('Ange minst ett namn.', 'danger'); return; }
+        const template = await Web.get('templates', Number(select.value));
+        const kurskod = form.kurskod.value.trim();
+        const datum = form.datum.value || '{{ today }}';
+
+        setBusy(true);
+        progressBox.hidden = false;
+        const update = (done, total) => {
+            progressBar.style.width = `${Math.round(100 * done / total)}%`;
+            progressText.textContent = `${done} av ${total} intyg klara …`;
+        };
+        update(0, names.length);
+        const result = await Web.generate(template, kurskod, datum, names, update);
+        setBusy(false);
+
+        if (!result.error) {
+            Web.flashNext(`${result.created} intyg skapades och har sparats i webbläsaren.`, 'success');
+            location.href = `{{ url_for('certificates') }}?batch=${result.batchId}`;
+        } else if (result.created) {
+            Web.flashNext(`${result.created} av ${names.length} intyg skapades innan ett fel inträffade: ${result.error.message}`, 'warning');
+            location.href = `{{ url_for('certificates') }}?batch=${result.batchId}`;
+        } else {
+            progressBox.hidden = true;
+            Web.showAlert(`Intygen kunde inte skapas: ${result.error.message}`, 'danger');
+        }
+    });
+
+    uploadForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const file = uploadForm.docx_file.files[0];
+        if (!file) return;
+        const button = uploadForm.querySelector('button');
+        button.disabled = true;
+        try {
+            if (!file.name.toLowerCase().endsWith('.docx')) throw new Error('Endast Word-filer (.docx) kan användas som mall.');
+            const template = await Web.addTemplate(file, uploadForm.elements.name.value.trim());
+            uploadForm.reset();
+            bootstrap.Collapse.getOrCreateInstance(document.getElementById('uploadBox')).hide();
+            await loadTemplates(template.id);
+            previewTemplate();
+            if (!template.placeholders.includes('NAMN')) {
+                Web.showAlert(`Mallen ”${template.name}” sparades, men den innehåller ingen platshållare NAMN.`, 'warning');
+            } else {
+                Web.showAlert(`Mallen ”${template.name}” sparades.`, 'success');
+            }
+        } catch (error) {
+            Web.showAlert(error.message, 'danger');
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    select.addEventListener('change', previewTemplate);
+    showTemplate.addEventListener('click', previewTemplate);
+    document.getElementById('sampleButton').addEventListener('click', previewSample);
+
+    (async () => {
+        try {
+            await Web.ensureExampleTemplate();
+            await loadTemplates(Number(new URLSearchParams(location.search).get('template')) || null);
+            previewTemplate();
+        } catch (error) {
+            Web.showAlert(error.message, 'danger');
+        }
+    })();
+})();
+</script>
+{% endblock %}

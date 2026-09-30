@@ -15,7 +15,7 @@ from flask import (Flask, abort, flash, redirect, render_template, request, send
 from werkzeug.utils import secure_filename
 
 from docx_fill import fill_template, find_placeholders
-from pdf_convert import ConversionError, convert_to_pdf, find_soffice
+from pdf_convert import ConversionError, convert_to_pdf, find_converter
 from storage import Storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +58,9 @@ def create_app(config=None):
     app.config.update(
         DATA_DIR=os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data")),
         APP_PASSWORD=os.environ.get("APP_PASSWORD", ""),
+        # "server": mallar och intyg sparas i DATA_DIR (desktopversionen).
+        # "browser": inget sparas på servern, allt sparas i användarens webbläsare (webbversionen).
+        STORAGE_MODE=os.environ.get("STORAGE_MODE", "server"),
         PDF_PREWARM=True,
         MAX_CONTENT_LENGTH=20 * 1024 * 1024,
         # Andra sajter kan inte skicka POST (t.ex. radera intyg) med inloggningen.
@@ -65,37 +68,13 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+    if app.config["STORAGE_MODE"] not in ("server", "browser"):
+        raise ValueError(f"Okänt STORAGE_MODE: {app.config['STORAGE_MODE']}")
 
-    storage = Storage(app.config["DATA_DIR"])
-    app.config["STORAGE"] = storage
-    app.secret_key = _load_secret_key(storage.data_dir)
+    os.makedirs(app.config["DATA_DIR"], exist_ok=True)
+    app.secret_key = _load_secret_key(app.config["DATA_DIR"])
 
-    if storage.claim_once("example_template_seeded") and os.path.exists(EXAMPLE_TEMPLATE):
-        key = storage.new_key()
-        shutil.copyfile(EXAMPLE_TEMPLATE, os.path.join(storage.templates_dir, key + ".docx"))
-        storage.add_template("Exempelmall", "exempelmall.docx", key, find_placeholders(EXAMPLE_TEMPLATE))
-
-    # --- hjälpfunktioner --------------------------------------------------
-
-    def ensure_pdfs(pairs):
-        convert_to_pdf(pairs, storage.work_dir)
-
-    def prewarm(pairs):
-        """Skapar PDF:er i bakgrunden så att förhandsvisningen går snabbt."""
-        if not app.config["PDF_PREWARM"] or not find_soffice():
-            return
-
-        def run():
-            try:
-                ensure_pdfs(pairs)
-            except Exception:
-                log.exception("PDF-förkonvertering misslyckades")
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def pdf_response(pdf_path, download_name, as_attachment=False):
-        return send_file(pdf_path, mimetype="application/pdf", as_attachment=as_attachment,
-                         download_name=download_name, max_age=0)
+    # --- gemensamma hjälpfunktioner ---------------------------------------
 
     def preview_error(message, status):
         return render_template("preview_error.html", message=message), status
@@ -105,9 +84,6 @@ def create_app(config=None):
         ref = request.referrer or ""
         return ref if ref.startswith(request.host_url) else url_for(default_endpoint)
 
-    def selected_ids():
-        return [int(i) for i in request.form.getlist("ids") if i.isdigit()]
-
     # --- inloggning (valfri, aktiveras med APP_PASSWORD) ------------------
 
     @app.before_request
@@ -116,6 +92,8 @@ def create_app(config=None):
             return None
         if request.endpoint in ("login", "static"):
             return None
+        if request.path.startswith("/api/"):
+            return {"error": "Du är inte inloggad."}, 401
         return redirect(url_for("login", next=request.full_path))
 
     @app.route("/login", methods=["GET", "POST"])
@@ -138,6 +116,56 @@ def create_app(config=None):
     def logout():
         session.clear()
         return redirect(url_for("index"))
+
+    @app.route("/download_template")
+    def download_template():
+        """Exempelmallen (samma adress som i första versionen)."""
+        return send_file(EXAMPLE_TEMPLATE, as_attachment=True, download_name="exempelmall.docx")
+
+    @app.errorhandler(413)
+    def too_large(_):
+        if request.path.startswith("/api/"):
+            return {"error": "Filen är för stor (max 20 MB)."}, 413
+        flash("Filen är för stor (max 20 MB).", "danger")
+        return redirect(back_url("index"))
+
+    if app.config["STORAGE_MODE"] == "browser":
+        from web_mode import register_browser_routes
+        register_browser_routes(app)
+        return app
+
+    # --- lagring på servern (desktopversionen) ----------------------------
+
+    storage = Storage(app.config["DATA_DIR"])
+    app.config["STORAGE"] = storage
+
+    if storage.claim_once("example_template_seeded") and os.path.exists(EXAMPLE_TEMPLATE):
+        key = storage.new_key()
+        shutil.copyfile(EXAMPLE_TEMPLATE, os.path.join(storage.templates_dir, key + ".docx"))
+        storage.add_template("Exempelmall", "exempelmall.docx", key, find_placeholders(EXAMPLE_TEMPLATE))
+
+    def ensure_pdfs(pairs):
+        convert_to_pdf(pairs, storage.work_dir)
+
+    def prewarm(pairs):
+        """Skapar PDF:er i bakgrunden så att förhandsvisningen går snabbt."""
+        if not app.config["PDF_PREWARM"] or not find_converter():
+            return
+
+        def run():
+            try:
+                ensure_pdfs(pairs)
+            except Exception:
+                log.exception("PDF-förkonvertering misslyckades")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def pdf_response(pdf_path, download_name, as_attachment=False):
+        return send_file(pdf_path, mimetype="application/pdf", as_attachment=as_attachment,
+                         download_name=download_name, max_age=0)
+
+    def selected_ids():
+        return [int(i) for i in request.form.getlist("ids") if i.isdigit()]
 
     # --- skapa intyg ------------------------------------------------------
 
@@ -272,11 +300,6 @@ def create_app(config=None):
         flash(f"Mallen ”{template['name']}” togs bort. Redan skapade intyg finns kvar.", "success")
         return redirect(url_for("templates"))
 
-    @app.route("/download_template")
-    def download_template():
-        """Exempelmallen (samma adress som i första versionen)."""
-        return send_file(EXAMPLE_TEMPLATE, as_attachment=True, download_name="exempelmall.docx")
-
     # --- sparade intyg ----------------------------------------------------
 
     @app.route("/certificates", methods=["GET"])
@@ -364,11 +387,6 @@ def create_app(config=None):
         else:
             flash("Markera minst ett intyg att ta bort.", "warning")
         return redirect(back_url("certificates"))
-
-    @app.errorhandler(413)
-    def too_large(_):
-        flash("Filen är för stor (max 20 MB).", "danger")
-        return redirect(back_url("index"))
 
     return app
 
