@@ -131,7 +131,7 @@ def create_app(config=None):
 
     if app.config["STORAGE_MODE"] == "browser":
         from web_mode import register_browser_routes
-        register_browser_routes(app)
+        register_browser_routes(app, EXAMPLE_TEMPLATE)
         return app
 
     # --- lagring på servern (desktopversionen) ----------------------------

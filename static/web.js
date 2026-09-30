@@ -1,6 +1,6 @@
-/* Webbversionen: mallar och intyg sparas i webbläsarens IndexedDB, bara på den
-   här datorn. Servern fyller i mallar och gör PDF:er (se web_mode.py) men
-   sparar ingenting. */
+/* Webbversionen: mallarna är gemensamma och sparas på servern. Intygen sparas
+   bara i webbläsarens IndexedDB, på den här datorn; servern fyller i mallen och
+   gör PDF:er (se web_mode.py) men sparar aldrig intygen. */
 const Web = (() => {
     const DB_NAME = 'certifikatgenerator';
     const DB_VERSION = 1;
@@ -27,11 +27,9 @@ const Web = (() => {
                 const request = indexedDB.open(DB_NAME, DB_VERSION);
                 request.onupgradeneeded = () => {
                     const db = request.result;
-                    db.createObjectStore('templates', { keyPath: 'id', autoIncrement: true });
                     db.createObjectStore('batches', { keyPath: 'id', autoIncrement: true });
                     const certs = db.createObjectStore('certificates', { keyPath: 'id', autoIncrement: true });
                     certs.createIndex('batchId', 'batchId');
-                    db.createObjectStore('meta', { keyPath: 'key' });
                 };
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = () => reject(new Error('Kunde inte öppna webbläsarens lagring. I privat läge går det ibland inte att spara.'));
@@ -85,10 +83,10 @@ const Web = (() => {
 
     // --- server-API ------------------------------------------------------
 
-    async function api(path, formData) {
+    async function api(path, formData = null, method = formData ? 'POST' : 'GET') {
         let response;
         try {
-            response = await fetch(path, { method: 'POST', body: formData, credentials: 'same-origin' });
+            response = await fetch(path, { method, body: formData, credentials: 'same-origin' });
         } catch (error) {
             throw new Error('Kunde inte nå servern. Kontrollera anslutningen och försök igen.');
         }
@@ -107,76 +105,45 @@ const Web = (() => {
         return response;
     }
 
-    function templateForm(docx) {
+    async function previewPdf(templateId, name, datum) {
         const form = new FormData();
-        form.append('docx_file', docx, 'mall.docx');
-        return form;
-    }
-
-    async function inspect(file) {
-        const response = await api('/api/inspect', templateForm(file));
-        return (await response.json()).placeholders;
-    }
-
-    async function previewPdf(docx, name = '', datum = '') {
-        const form = templateForm(docx);
-        if (name) {
-            form.append('name', name);
-            form.append('datum', datum);
-        }
+        form.append('template_id', templateId);
+        form.append('name', name);
+        form.append('datum', datum);
         return (await api('/api/preview', form)).blob();
     }
 
-    // --- mallar ----------------------------------------------------------
+    // --- gemensamma mallar (sparas på servern) ---------------------------
 
     async function listTemplates() {
-        const templates = await getAll('templates');
-        return templates.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id);
+        return (await (await api('/api/templates')).json()).templates;
     }
 
     async function addTemplate(file, name) {
-        const placeholders = await inspect(file);
-        const docx = new Blob([await file.arrayBuffer()], { type: DOCX_TYPE });
-        const template = {
-            name: name || file.name.replace(/\.docx$/i, ''),
-            filename: file.name,
-            placeholders,
-            createdAt: now(),
-            docx,
-            pdf: null,
-        };
-        const id = await write('templates', tx => tx.objectStore('templates').add(template));
-        requestPersistence();
-        return { ...template, id };
+        const form = new FormData();
+        form.append('docx_file', file, file.name);
+        form.append('name', name);
+        return (await api('/api/templates', form)).json();
     }
 
-    /* PDF av mallen; skapas en gång av servern och sparas sedan i webbläsaren. */
+    /* PDF av mallen; servern skapar den en gång och sparar den med mallen. */
+    const templatePdfs = new Map();
     async function templatePdf(id) {
-        const template = await get('templates', id);
-        if (!template) throw new Error('Mallen finns inte längre.');
-        if (template.pdf) return template.pdf;
-        const pdf = await previewPdf(template.docx);
-        template.pdf = pdf;
-        await write('templates', tx => tx.objectStore('templates').put(template)).catch(() => {});
-        return pdf;
+        if (!templatePdfs.has(id)) {
+            const pending = api(`/api/templates/${id}/preview`).then(r => r.blob());
+            templatePdfs.set(id, pending);
+            pending.catch(() => templatePdfs.delete(id));
+        }
+        return templatePdfs.get(id);
+    }
+
+    function templateDocxUrl(id) {
+        return `/api/templates/${id}/docx`;
     }
 
     async function deleteTemplate(id) {
-        await write('templates', tx => tx.objectStore('templates').delete(id));
-    }
-
-    /* Exempelmallen läggs in första gången, precis som i desktopversionen. */
-    async function ensureExampleTemplate() {
-        if (await get('meta', 'exampleSeeded')) return;
-        await write('meta', tx => tx.objectStore('meta').put({ key: 'exampleSeeded', value: true }));
-        try {
-            const response = await fetch('/download_template', { credentials: 'same-origin' });
-            if (!response.ok) throw new Error();
-            const file = new File([await response.blob()], 'exempelmall.docx', { type: DOCX_TYPE });
-            await addTemplate(file, 'Exempelmall');
-        } catch (error) {
-            await write('meta', tx => tx.objectStore('meta').delete('exampleSeeded'));
-        }
+        await api(`/api/templates/${id}`, null, 'DELETE');
+        templatePdfs.delete(id);
     }
 
     // --- intyg -----------------------------------------------------------
@@ -189,7 +156,8 @@ const Web = (() => {
         try {
             for (let i = 0; i < names.length; i += CHUNK) {
                 const part = names.slice(i, i + CHUNK);
-                const form = templateForm(template.docx);
+                const form = new FormData();
+                form.append('template_id', template.id);
                 form.append('datum', datum);
                 form.append('names', JSON.stringify(part));
                 const zip = await JSZip.loadAsync(await (await api('/api/generate', form)).blob());
@@ -352,8 +320,8 @@ const Web = (() => {
     document.addEventListener('DOMContentLoaded', showFlashed);
 
     return {
-        openDb, listTemplates, addTemplate, templatePdf, deleteTemplate, ensureExampleTemplate,
-        get, previewPdf, generate, listCertificates, listBatches, getCertificates, deleteCertificates,
+        openDb, listTemplates, addTemplate, templatePdf, templateDocxUrl, deleteTemplate,
+        previewPdf, generate, listCertificates, listBatches, getCertificates, deleteCertificates,
         certificateFilename, safeFilenamePart, download, downloadCertificates,
         showAlert, flashNext, objectUrl, releaseObjectUrls, el,
     };

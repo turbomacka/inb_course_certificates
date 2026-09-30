@@ -37,7 +37,7 @@
     </div>
 </div>
 <div class="alert alert-secondary" id="noTemplates" hidden>Det finns inga sparade mallar ännu.</div>
-<p class="small text-muted mt-2">Mallarna sparas bara i den här webbläsaren på den här datorn. Rensar du webbläsarens data försvinner de.</p>
+<p class="small text-muted mt-2">Mallarna är gemensamma: alla som använder webbversionen ser och kan använda dem, på alla datorer.</p>
 {% endblock %}
 
 {% block scripts %}
@@ -59,9 +59,13 @@
         const remove = el('button', {
             type: 'button', class: 'btn btn-sm btn-outline-danger',
             onclick: async () => {
-                if (!confirm(`Ta bort mallen ”${t.name}”? Redan skapade intyg påverkas inte.`)) return;
-                await Web.deleteTemplate(t.id);
-                Web.showAlert(`Mallen ”${t.name}” togs bort. Redan skapade intyg finns kvar.`, 'success');
+                if (!confirm(`Ta bort mallen ”${t.name}” för alla användare? Redan skapade intyg påverkas inte.`)) return;
+                try {
+                    await Web.deleteTemplate(t.id);
+                    Web.showAlert(`Mallen ”${t.name}” togs bort. Redan skapade intyg finns kvar.`, 'success');
+                } catch (error) {
+                    Web.showAlert(error.message, 'danger');
+                }
                 render();
             },
         }, 'Ta bort');
@@ -77,10 +81,7 @@
             el('td', { class: 'text-end actions' },
                 preview, ' ',
                 el('a', { class: 'btn btn-sm btn-outline-secondary', href: `{{ url_for('index') }}?template=${t.id}` }, 'Använd'), ' ',
-                el('button', {
-                    type: 'button', class: 'btn btn-sm btn-outline-secondary',
-                    onclick: () => Web.download(t.docx, `${Web.safeFilenamePart(t.name)}.docx`),
-                }, 'Ladda ner'), ' ',
+                el('a', { class: 'btn btn-sm btn-outline-secondary', href: Web.templateDocxUrl(t.id) }, 'Ladda ner'), ' ',
                 remove));
     }
 
@@ -115,14 +116,7 @@
         }
     });
 
-    (async () => {
-        try {
-            await Web.ensureExampleTemplate();
-            await render();
-        } catch (error) {
-            Web.showAlert(error.message, 'danger');
-        }
-    })();
+    render().catch(error => Web.showAlert(error.message, 'danger'));
 })();
 </script>
 {% endblock %}

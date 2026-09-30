@@ -3,7 +3,7 @@
 Creates personalised course certificates from Word templates. It comes in two versions with the same features:
 
 - **Desktop** (`STORAGE_MODE=server`, default): runs locally on your computer. Templates and certificates are saved in `data/`. PDFs are made with Microsoft Word, or with LibreOffice when Word is not available.
-- **Web** (`STORAGE_MODE=browser`): hosted on Render's free plan. Nothing is saved on the server: templates and certificates are saved in each user's own browser (IndexedDB). The server only fills in templates and makes PDFs with LibreOffice, in a temporary folder that is deleted before the response is sent.
+- **Web** (`STORAGE_MODE=browser`): hosted on Render's free plan. Templates are shared by all users and saved in PostgreSQL (`DATABASE_URL`, e.g. Neon's free plan). Certificates are never saved on the server, only in each user's own browser (IndexedDB). The server fills in templates and makes PDFs with LibreOffice in a temporary folder that is deleted before the response is sent.
 
 This is the new version. The original app (repo `turbomacka/course_certificates`, commit `56298e4`) keeps running unchanged at https://course-certificates.onrender.com/.
 
@@ -31,12 +31,22 @@ Double-click **`Starta certifikatgenerator.bat`** (or the desktop shortcut). The
 
 https://render.com/deploy?repo=https://github.com/turbomacka/inb_course_certificates/tree/v2
 
-Render asks for `APP_PASSWORD` and generates `SECRET_KEY`. Change the password later under the service's **Environment** tab. The free plan sleeps after 15 minutes without visits, so the first page load after a pause takes about a minute.
+Render asks for `APP_PASSWORD` and `DATABASE_URL` and generates `SECRET_KEY`. Change them later under the service's **Environment** tab. The free plan sleeps after 15 minutes without visits, so the first page load after a pause takes about a minute.
 
 In the web version:
 
-- Templates and certificates exist only in the browser and on the computer where they were created. Clearing the browser's site data deletes them, so users should download the certificates they want to keep.
-- Names and templates are sent to the server while a PDF is being made, but they are never written anywhere permanent.
+- Templates are shared: everyone who logs in sees, uses and can delete the same templates, on any computer. The example template is added once. The PDF preview of a template is made once and stored with it.
+- Certificates exist only in the browser and on the computer where they were created. Clearing the browser's site data deletes them, so users should download the certificates they want to keep.
+- Names are sent to the server while a PDF is being made, but they are never written anywhere permanent.
+- Without `DATABASE_URL` templates are kept in SQLite in `DATA_DIR`, which Render's free plan wipes when the service sleeps. Use this only for local testing.
+
+### Database (Neon, free)
+
+1. Create a free project at https://neon.tech (region: Europe, e.g. Frankfurt).
+2. Copy the connection string (`postgresql://…?sslmode=require`) from **Connect**.
+3. Paste it as `DATABASE_URL` in Render. Never commit it.
+
+The tables are created automatically on first start.
 - Certificates are generated five names per request, with a progress bar.
 
 ## Configuration
@@ -48,6 +58,7 @@ In the web version:
 | `PDF_CONVERTER` | `auto` | `word`, `libreoffice` or `auto` (Word if available, otherwise LibreOffice). |
 | `PORT` | `8765` | Port for `run_local.py`. |
 | `APP_PASSWORD` | empty (no login) | If set, every page requires this password. |
+| `DATABASE_URL` | empty | Web version: PostgreSQL for the shared templates. |
 | `SECRET_KEY` | generated and stored in `DATA_DIR/.secret_key` | Session signing key. |
 
 > **Note:** certificates contain student names. Set `APP_PASSWORD` whenever the app runs on a server reachable by others (the Render Blueprint asks for it).
@@ -58,6 +69,8 @@ In the web version:
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements-dev.txt   # Linux/macOS: .venv/bin/python
 .venv/Scripts/python -m pytest -q tests   # PDF test runs when Word or LibreOffice is found
+# Also test the web version against PostgreSQL:
+# TEST_DATABASE_URL=postgresql://user:pass@host:5432/db .venv/Scripts/python -m pytest -q tests
 ```
 
 The Docker image (LibreOffice + Gunicorn) still works, for example for testing the LibreOffice path:
@@ -74,8 +87,9 @@ docker run --rm -v "$PWD/tests:/app/tests:ro" -v "$PWD/cert_template:/app/cert_t
 - `Starta certifikatgenerator.bat`: Windows launcher (sets up `.venv`, starts `run_local.py`).
 - `run_local.py`: serves the app with Waitress on `127.0.0.1` and opens the browser.
 - `app.py`: Flask app, login, and the desktop routes (create, templates, certificates).
-- `web_mode.py`: web version API (`/api/inspect`, `/api/preview`, `/api/generate`); stores nothing.
-- `static/web.js`, `templates/web/`: web version pages; templates and certificates in IndexedDB.
+- `web_mode.py`: web version API: shared templates (`/api/templates…`) and certificate generation (`/api/preview`, `/api/generate`), which stores nothing.
+- `template_store.py`: shared templates in PostgreSQL (`DATABASE_URL`) or SQLite.
+- `static/web.js`, `templates/web/`: web version pages; certificates in IndexedDB.
 - `storage.py`: SQLite metadata and file storage under `DATA_DIR` (desktop).
 - `docx_fill.py`: placeholder detection and replacement in `.docx` files.
 - `pdf_convert.py`: PDF conversion with Word (COM) or LibreOffice, chunked and serialised.

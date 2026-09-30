@@ -5,3 +5,4 @@ lxml==5.3.0
 gunicorn==23.0.0
 waitress==3.0.2
 pywin32==308; sys_platform == "win32"
+psycopg[binary]==3.2.3

@@ -1,6 +1,7 @@
 # Render Blueprint för webbversionen av v2 (gratisnivå). Skapar en egen tjänst;
 # den gamla tjänsten (course-certificates.onrender.com) påverkas inte.
-# STORAGE_MODE=browser: mallar och intyg sparas i användarens webbläsare, så
+# STORAGE_MODE=browser: intygen sparas bara i användarens webbläsare. Mallarna är
+# gemensamma och sparas i PostgreSQL (DATABASE_URL, t.ex. Neons gratisnivå), så
 # ingen persistent disk behövs.
 services:
   - type: web
@@ -16,5 +17,7 @@ services:
         value: browser
       - key: APP_PASSWORD
         sync: false # Render frågar efter värdet när tjänsten skapas
+      - key: DATABASE_URL
+        sync: false # anslutningsadressen från Neon
       - key: SECRET_KEY
         generateValue: true

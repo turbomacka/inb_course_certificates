@@ -73,7 +73,7 @@
                     Är du osäker? Ladda ner en <a href="{{ url_for('download_template') }}" class="alert-link">exempelmall</a>.
                 </section>
 
-                <p class="small text-muted mt-3 mb-0">Mallar och intyg sparas bara i den här webbläsaren, inte på servern.</p>
+                <p class="small text-muted mt-3 mb-0">Mallarna är gemensamma för alla användare. Intygen sparas bara i den här webbläsaren, inte på servern.</p>
             </div>
         </div>
     </div>
@@ -113,6 +113,7 @@
     const progressText = document.getElementById('progressText');
     let previewUrl = null;
     let previewToken = 0;
+    let templatesById = new Map();
 
     function showPdf(blob) {
         if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -156,14 +157,13 @@
         label.textContent = 'Exempel med första namnet';
         showTemplate.hidden = false;
         const names = form.student_list.value.split('\n').map(s => s.trim()).filter(Boolean);
-        withPreview('Förhandsvisningen', async () => {
-            const template = await Web.get('templates', Number(select.value));
-            return Web.previewPdf(template.docx, names[0] || 'Förnamn Efternamn', form.datum.value);
-        });
+        withPreview('Förhandsvisningen', () =>
+            Web.previewPdf(Number(select.value), names[0] || 'Förnamn Efternamn', form.datum.value));
     }
 
     async function loadTemplates(selectedId) {
         const templates = await Web.listTemplates();
+        templatesById = new Map(templates.map(t => [t.id, t]));
         select.replaceChildren(...templates.map(t => new Option(t.name, t.id)));
         document.getElementById('noTemplates').hidden = templates.length > 0;
         if (selectedId && templates.some(t => t.id === selectedId)) select.value = String(selectedId);
@@ -179,7 +179,7 @@
         const names = form.student_list.value.split('\n').map(s => s.trim()).filter(Boolean);
         if (!select.value) { Web.showAlert('Välj en mall.', 'danger'); return; }
         if (!names.length) { Web.showAlert('Ange minst ett namn.', 'danger'); return; }
-        const template = await Web.get('templates', Number(select.value));
+        const template = templatesById.get(Number(select.value));
         const kurskod = form.kurskod.value.trim();
         const datum = form.datum.value || '{{ today }}';
 
@@ -236,7 +236,6 @@
 
     (async () => {
         try {
-            await Web.ensureExampleTemplate();
             await loadTemplates(Number(new URLSearchParams(location.search).get('template')) || null);
             previewTemplate();
         } catch (error) {
