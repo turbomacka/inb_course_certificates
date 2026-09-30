@@ -166,6 +166,35 @@ def test_api_requires_login_with_json_401(config):
     assert client.get("/api/templates").status_code == 200
 
 
+@pytest.mark.skipif(not PG_URL, reason="TEST_DATABASE_URL saknas")
+def test_concurrent_startup_on_empty_postgres():
+    """Flera Gunicorn-processer som startar samtidigt får inte krocka när tabellerna skapas."""
+    import threading
+
+    import psycopg
+
+    from template_store import TemplateStore
+
+    for _ in range(5):
+        with psycopg.connect(PG_URL) as conn:
+            conn.execute("DROP TABLE IF EXISTS shared_templates, shared_meta")
+        errors, barrier = [], threading.Barrier(4)
+
+        def start():
+            barrier.wait()
+            try:
+                TemplateStore(PG_URL)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=start) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+
+
 def test_unknown_storage_mode_is_rejected(data_dir):
     with pytest.raises(ValueError):
         create_app({"DATA_DIR": str(data_dir), "STORAGE_MODE": "moln"})

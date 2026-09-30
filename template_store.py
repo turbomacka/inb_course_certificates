@@ -36,6 +36,8 @@ _SCHEMA = {
 }
 
 _COLUMNS = "id, name, filename, placeholders, created_at"
+# Godtyckligt men fast nummer för låset kring tabellskapandet i PostgreSQL.
+_SCHEMA_LOCK = 815_001
 
 
 def _now():
@@ -59,8 +61,19 @@ class TemplateStore:
             self.kind = "sqlite"
             self._connect = lambda: sqlite3.connect(sqlite_path, timeout=30)
             self._param = "?"
-        for statement in _SCHEMA[self.kind]:
-            self._run(statement)
+        self._create_schema()
+
+    def _create_schema(self):
+        # Gunicorn startar flera processer samtidigt. I PostgreSQL kan två samtidiga
+        # CREATE TABLE IF NOT EXISTS krocka (UniqueViolation), så de körs i en
+        # transaktion under ett lås som släpps när transaktionen är klar.
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            if self.kind == "postgres":
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK,))
+            for statement in _SCHEMA[self.kind]:
+                cur.execute(statement)
+            conn.commit()
 
     def _run(self, sql, args=(), fetch=None):
         sql = sql.replace("?", self._param)
